@@ -1,11 +1,16 @@
 #include "GameEngine.h"
+#include "Database.h"
+#include "GameRecord.h"
 #include <iostream>
 #include <stdexcept>
 #include <string>
 
 GameEngine::GameEngine(int numPlayers, int numDecks, int startingChips,
                        uint32_t deckSeed, bool aiOnly)
-    : m_deck(numDecks), m_state(GameState::Betting), m_roundNumber(0) {
+    : m_deck(numDecks)
+    , m_state(GameState::Betting)
+    , m_database(std::make_unique<Database>())
+    , m_roundNumber(0) {
     if (deckSeed != 0) {
         m_deck.shuffle(deckSeed);
     }
@@ -15,7 +20,11 @@ GameEngine::GameEngine(int numPlayers, int numDecks, int startingChips,
             : ("Player " + std::to_string(i + 1));
         m_players.emplace_back(name, startingChips, aiOnly);
     }
+    AgentType agentType = aiOnly ? AgentType::QLearning : AgentType::Human;
+    m_sessionId = m_database->startSession(agentType, numDecks, startingChips);
 }
+
+GameEngine::~GameEngine() = default;
 
 // ─── Public ──────────────────────────────────────────────────────────────────
 
@@ -24,6 +33,15 @@ void GameEngine::run() {
     while (m_state != GameState::GameOver) {
         executeCurrentState();
     }
+
+    // Flush any buffered rounds and close the session record
+    m_database->flushBatch();
+    int finalChips = m_players.empty() ? 0 : m_players[0].getChips();
+    double winRate = m_handsThisSession > 0
+        ? static_cast<double>(m_winsThisSession) / m_handsThisSession
+        : 0.0;
+    m_database->endSession(m_sessionId, finalChips, m_roundNumber, winRate);
+
     for (const auto& p : m_players) {
         m_view.showGameOver(p.getName(), p.getChips());
     }
@@ -124,6 +142,9 @@ void GameEngine::executeBetting() {
         std::cout << "(Shoe reshuffled)\n";
     }
 
+    // Reset per-round action tracking (one entry per player, per hand; splits add entries)
+    m_handActions.assign(m_players.size(), std::vector<std::string>(1, "Stand"));
+
     for (auto& player : m_players) {
         if (player.isAI()) {
             player.placeBet(MIN_BET);
@@ -166,22 +187,23 @@ void GameEngine::executeInsurance() {
 }
 
 void GameEngine::executePlayerTurns() {
-    for (auto& player : m_players) {
-        int hands = player.handCount();
+    for (int pi = 0; pi < static_cast<int>(m_players.size()); ++pi) {
+        int hands = m_players[pi].handCount();
         for (int idx = 0; idx < hands; ++idx) {
-            runSingleHandTurn(player, idx);
+            runSingleHandTurn(m_players[pi], pi, idx);
         }
     }
     transitionTo(GameState::DealerTurn);
 }
 
-void GameEngine::runSingleHandTurn(Player& player, int handIndex) {
+void GameEngine::runSingleHandTurn(Player& player, int playerIndex, int handIndex) {
     m_view.showTable(m_players, m_dealer, true);
 
     Hand& hand = player.getHand(handIndex);
 
     if (hand.isBlackjack()) {
         m_view.showBlackjackMessage(player.getName());
+        // action remains "Stand" (natural blackjack — no action taken)
         return;
     }
 
@@ -196,6 +218,7 @@ void GameEngine::runSingleHandTurn(Player& player, int handIndex) {
 
         switch (action) {
             case PlayerAction::Hit: {
+                m_handActions[playerIndex][handIndex] = "Hit";
                 hand.addCard(m_deck.deal());
                 m_view.showPlayerHand(player, handIndex);
                 if (hand.isBust()) {
@@ -205,9 +228,11 @@ void GameEngine::runSingleHandTurn(Player& player, int handIndex) {
                 break;
             }
             case PlayerAction::Stand: {
+                m_handActions[playerIndex][handIndex] = "Stand";
                 return;
             }
             case PlayerAction::Double: {
+                m_handActions[playerIndex][handIndex] = "Double";
                 player.receiveWinnings(0);
                 int extra = player.getCurrentBet();
                 player.placeBet(extra);
@@ -219,9 +244,14 @@ void GameEngine::runSingleHandTurn(Player& player, int handIndex) {
                 return;
             }
             case PlayerAction::Split: {
+                m_handActions[playerIndex][handIndex] = "Split";
                 bool splitAces =
                     (player.getHand(handIndex).getCards()[0].getRank() == Rank::Ace);
                 player.splitHand();
+                // After split, we now have 2 hands — ensure action slots exist
+                if (static_cast<int>(m_handActions[playerIndex].size()) < 2) {
+                    m_handActions[playerIndex].resize(2, "Stand");
+                }
                 player.getHand(0).addCard(m_deck.deal());
                 player.getHand(1).addCard(m_deck.deal());
 
@@ -229,12 +259,13 @@ void GameEngine::runSingleHandTurn(Player& player, int handIndex) {
                     m_view.showPlayerHand(player, 0);
                     m_view.showPlayerHand(player, 1);
                 } else {
-                    runSingleHandTurn(player, 0);
-                    runSingleHandTurn(player, 1);
+                    runSingleHandTurn(player, playerIndex, 0);
+                    runSingleHandTurn(player, playerIndex, 1);
                 }
                 return;
             }
             case PlayerAction::Surrender: {
+                m_handActions[playerIndex][handIndex] = "Surrender";
                 player.surrender();
                 m_view.showSurrenderMessage(player.getName());
                 return;
@@ -266,7 +297,12 @@ void GameEngine::executeDealerTurn() {
 }
 
 void GameEngine::executeSettling() {
-    for (auto& player : m_players) {
+    int dealerUpcard = m_dealer.getHand(0).getCards().empty()
+        ? 0
+        : m_dealer.getHand(0).getCards()[0].getValue();
+
+    for (int pi = 0; pi < static_cast<int>(m_players.size()); ++pi) {
+        auto& player = m_players[pi];
         int bet = player.getCurrentBet();
 
         // Insurance settlement
@@ -284,7 +320,23 @@ void GameEngine::executeSettling() {
 
         // Surrender half-return
         if (player.hasSurrendered()) {
+            int chipsBefore = player.getChips();
             player.receiveWinnings(bet / 2);
+            GameRecord rec;
+            rec.sessionId         = m_sessionId;
+            rec.timestamp         = currentTimestamp();
+            rec.playerHand        = serializeHand(player.getHand(0));
+            rec.dealerHand        = serializeHand(m_dealer.getHand(0));
+            rec.actionTaken       = "Surrender";
+            rec.outcome           = "Surrender";
+            rec.chipsBefore       = chipsBefore;
+            rec.chipsAfter        = player.getChips();
+            rec.betAmount         = bet;
+            rec.isSoftHand        = player.getHand(0).isSoft();
+            rec.dealerUpcardValue = dealerUpcard;
+            m_database->insertRound(rec);
+            ++m_handsThisSession;
+            if (m_database->batchReady()) { m_database->flushBatch(); }
             continue;
         }
 
@@ -293,31 +345,73 @@ void GameEngine::executeSettling() {
             const Hand& ph = player.getHand(idx);
             const Hand& dh = m_dealer.getHand(0);
 
+            std::string actionTaken = (idx < static_cast<int>(m_handActions[pi].size()))
+                ? m_handActions[pi][idx]
+                : "Stand";
+
             if (ph.isBust()) {
                 m_view.showPayoutResult(player.getName(),
                     PayoutResult::Lose, bet, player.getChips());
+                GameRecord rec;
+                rec.sessionId         = m_sessionId;
+                rec.timestamp         = currentTimestamp();
+                rec.playerHand        = serializeHand(ph);
+                rec.dealerHand        = serializeHand(dh);
+                rec.actionTaken       = actionTaken;
+                rec.outcome           = "Lose";
+                rec.chipsBefore       = player.getChips();
+                rec.chipsAfter        = player.getChips();
+                rec.betAmount         = bet;
+                rec.isSoftHand        = ph.isSoft();
+                rec.dealerUpcardValue = dealerUpcard;
+                m_database->insertRound(rec);
+                ++m_handsThisSession;
+                if (m_database->batchReady()) { m_database->flushBatch(); }
                 continue;
             }
 
+            int chipsBefore = player.getChips();
             int payout = calculatePayout(ph, dh, bet);
             player.receiveWinnings(payout);
 
             PayoutResult res;
             int          display;
+            std::string  outcomeStr;
             if (payout == 0) {
-                res     = PayoutResult::Lose;
-                display = bet;
+                res        = PayoutResult::Lose;
+                display    = bet;
+                outcomeStr = "Lose";
             } else if (payout == bet) {
-                res     = PayoutResult::Push;
-                display = bet;
+                res        = PayoutResult::Push;
+                display    = bet;
+                outcomeStr = "Push";
             } else if (ph.isBlackjack() && !dh.isBlackjack()) {
-                res     = PayoutResult::Blackjack;
-                display = bet * BLACKJACK_PAYOUT_NUM / BLACKJACK_PAYOUT_DEN;
+                res        = PayoutResult::Blackjack;
+                display    = bet * BLACKJACK_PAYOUT_NUM / BLACKJACK_PAYOUT_DEN;
+                outcomeStr = "Blackjack";
             } else {
-                res     = PayoutResult::Win;
-                display = payout - bet;
+                res        = PayoutResult::Win;
+                display    = payout - bet;
+                outcomeStr = "Win";
             }
             m_view.showPayoutResult(player.getName(), res, display, player.getChips());
+
+            GameRecord rec;
+            rec.sessionId         = m_sessionId;
+            rec.timestamp         = currentTimestamp();
+            rec.playerHand        = serializeHand(ph);
+            rec.dealerHand        = serializeHand(dh);
+            rec.actionTaken       = actionTaken;
+            rec.outcome           = outcomeStr;
+            rec.chipsBefore       = chipsBefore;
+            rec.chipsAfter        = player.getChips();
+            rec.betAmount         = bet;
+            rec.isSoftHand        = ph.isSoft();
+            rec.dealerUpcardValue = dealerUpcard;
+            m_database->insertRound(rec);
+            ++m_handsThisSession;
+            if (outcomeStr == "Win" || outcomeStr == "Blackjack") { ++m_winsThisSession; }
+            if (m_database->batchReady()) { m_database->flushBatch(); }
         }
     }
 
@@ -350,9 +444,18 @@ void GameEngine::executeSettling() {
         return;
     }
 
-    if (m_view.promptPlayAgain()) {
-        transitionTo(GameState::Betting);
-    } else {
-        transitionTo(GameState::GameOver);
+    // Between-rounds menu: loop until the player makes a terminal choice
+    m_database->flushBatch();
+    while (true) {
+        PostRoundChoice choice = m_view.promptPlayAgain();
+        if (choice == PostRoundChoice::ShowHistory) {
+            m_database->displayHistory(m_sessionId, MAX_HISTORY_DISPLAY);
+        } else if (choice == PostRoundChoice::PlayAgain) {
+            transitionTo(GameState::Betting);
+            break;
+        } else {
+            transitionTo(GameState::GameOver);
+            break;
+        }
     }
 }

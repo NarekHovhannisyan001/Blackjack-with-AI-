@@ -203,21 +203,22 @@ bool ConsoleView::promptInsurance(const Player& player) {
     }
 }
 
-bool ConsoleView::promptPlayAgain() {
-    std::cout << "\nPlay again? (y/n): ";
+PostRoundChoice ConsoleView::promptPlayAgain() {
+    std::cout << "\n[Y]es play again  [H]istory  [N]o quit: ";
     while (true) {
         char c = '\0';
         std::cin >> c;
         if (!std::cin) {
             std::cin.clear();
             std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-            std::cout << "Please enter y or n: ";
+            std::cout << "Please enter y, h, or n: ";
             continue;
         }
         std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        if (c == 'y') { return true; }
-        if (c == 'n') { return false; }
-        std::cout << "Please enter y or n: ";
+        if (c == 'y') { return PostRoundChoice::PlayAgain; }
+        if (c == 'n') { return PostRoundChoice::Quit; }
+        if (c == 'h') { return PostRoundChoice::ShowHistory; }
+        std::cout << "Please enter y, h, or n: ";
     }
 }

@@ -80,9 +80,10 @@ public:
     /// Loops until a valid character is entered.
     bool promptInsurance(const Player& player);
 
-    /// Prompts "play again?" and returns true for y/Y, false for n/N.
+    /// Prompts the between-rounds menu: [Y]es / [H]istory / [N]o.
+    /// Returns PlayAgain, ShowHistory, or Quit.
     /// Loops until a valid character is entered.
-    bool promptPlayAgain();
+    PostRoundChoice promptPlayAgain();
 
 private:
     /// Builds the card display string for a hand, e.g. "[A♠] [K♥]".

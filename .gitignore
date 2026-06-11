@@ -67,3 +67,12 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# SQLite amalgamation download artifacts
+blackjack/vendor/sqlite/*.zip
+blackjack/vendor/sqlite/sqlite-amalgamation-*/
+
+# Database files generated at runtime
+*.db
+*.db-wal
+*.db-shm

@@ -18,9 +18,16 @@ enum class GameState { Betting, Dealing, Insurance, PlayerTurns, DealerTurn, Set
 /// Result of a hand settlement used for payout display.
 enum class PayoutResult { Win, Lose, Push, Blackjack, InsuranceWin, InsuranceLose };
 
+/// Player's choice at the between-rounds prompt.
+enum class PostRoundChoice { PlayAgain, ShowHistory, Quit };
+
 constexpr int MAX_PLAYERS          = 4;
 constexpr int MIN_BET              = 10;
 constexpr int STARTING_CHIPS       = 1000;
 constexpr int RESHUFFLE_THRESHOLD  = 52;
 constexpr int BLACKJACK_PAYOUT_NUM = 3;
 constexpr int BLACKJACK_PAYOUT_DEN = 2;
+
+constexpr int         BATCH_SIZE          = 1000;
+constexpr int         MAX_HISTORY_DISPLAY = 20;
+constexpr const char* DB_FILENAME         = "blackjack.db";

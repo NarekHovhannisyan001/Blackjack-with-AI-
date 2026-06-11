@@ -6,8 +6,11 @@
 #include "Player.h"
 #include "Types.h"
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
+
+class Database;
 
 /// Top-level game controller. Owns the deck, dealer, players, and view.
 /// Drives the game through a finite-state machine until GameOver.
@@ -24,6 +27,9 @@ public:
     GameEngine(int numPlayers, int numDecks, int startingChips,
                uint32_t deckSeed = 0, bool aiOnly = false);
 
+    // Destructor must be defined in .cpp where Database is a complete type.
+    ~GameEngine();
+
     /// Runs the game loop until GameState::GameOver is reached.
     void run();
 
@@ -38,12 +44,18 @@ public:
                         const Hand& dealerHand, int bet) const;
 
 private:
-    Deck                m_deck;
-    Dealer              m_dealer;
-    std::vector<Player> m_players;
-    GameState           m_state;
-    ConsoleView         m_view;
-    int                 m_roundNumber;
+    Deck                                     m_deck;
+    Dealer                                   m_dealer;
+    std::vector<Player>                      m_players;
+    GameState                                m_state;
+    ConsoleView                              m_view;
+    std::unique_ptr<Database>                m_database;
+    int                                      m_roundNumber;
+    int                                      m_sessionId       = 0;
+    int                                      m_winsThisSession = 0;
+    int                                      m_handsThisSession= 0;
+    // m_handActions[playerIdx][handIdx] = last action string for that hand
+    std::vector<std::vector<std::string>>    m_handActions;
 
     /// Validates and performs a state transition.
     /// @throws std::logic_error on an illegal transition.
@@ -60,7 +72,8 @@ private:
     void executeSettling();
 
     /// Runs one player hand to completion (hit/stand/double/split/surrender).
-    void runSingleHandTurn(Player& player, int handIndex);
+    /// playerIndex is used to record the action taken in m_handActions.
+    void runSingleHandTurn(Player& player, int playerIndex, int handIndex);
 
     static bool        isValidTransition(GameState from, GameState to);
     static std::string stateToString(GameState s);
