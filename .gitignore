@@ -43,6 +43,10 @@
 build/
 Build/
 build-*/
+build_release/
+
+# Claude Code internal memory
+.claude/
 
 # CMake generated files
 CMakeFiles/

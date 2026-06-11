@@ -25,6 +25,12 @@ add_library(blackjack_lib
     src/SqliteWrappers.cpp
     src/GameRecord.cpp
     src/Database.cpp
+    # Phase 3 sources
+    src/StateEncoder.cpp
+    src/PolicyManager.cpp
+    src/QLearningAgent.cpp
+    src/MonteCarloAgent.cpp
+    src/TrainingRunner.cpp
 )
 target_include_directories(blackjack_lib PUBLIC include)
 target_link_libraries(blackjack_lib PUBLIC sqlite3_lib)
@@ -37,11 +43,29 @@ endif()
 add_executable(blackjack src/main.cpp)
 target_link_libraries(blackjack PRIVATE blackjack_lib)
 
+# ── Training executable ──────────────────────────────────────────────────────
+add_executable(blackjack_train src/train_main.cpp)
+target_link_libraries(blackjack_train PRIVATE blackjack_lib)
+
 # ── Tests ───────────────────────────────────────────────────────────────────
 enable_testing()
+# Phase 1+2 tests
 foreach(t card deck hand engine database)
     add_executable(test_${t} tests/test_main.cpp tests/test_${t}.cpp)
     target_include_directories(test_${t} PRIVATE include tests vendor/sqlite)
     target_link_libraries(test_${t} PRIVATE blackjack_lib)
     add_test(NAME test_${t} COMMAND test_${t})
 endforeach()
+
+# Phase 3 tests
+foreach(t state_encoder qlearning montecarlo training)
+    add_executable(test_${t} tests/test_main.cpp tests/test_${t}.cpp)
+    target_include_directories(test_${t} PRIVATE include tests vendor/sqlite)
+    target_link_libraries(test_${t} PRIVATE blackjack_lib)
+    add_test(NAME test_${t} COMMAND test_${t})
+endforeach()
+
+# Release-mode optimisation for training
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    target_compile_options(blackjack_lib PRIVATE -O3 -march=native)
+endif()

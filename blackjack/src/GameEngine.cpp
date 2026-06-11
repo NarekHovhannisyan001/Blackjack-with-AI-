@@ -1,4 +1,5 @@
 #include "GameEngine.h"
+#include "AIAgent.h"
 #include "Database.h"
 #include "GameRecord.h"
 #include <iostream>
@@ -26,10 +27,39 @@ GameEngine::GameEngine(int numPlayers, int numDecks, int startingChips,
 
 GameEngine::~GameEngine() = default;
 
+void GameEngine::setAgent(std::unique_ptr<AIAgent> agent) {
+    m_agent = std::move(agent);
+}
+
+void GameEngine::setHeadless(bool headless) {
+    m_headless = headless;
+}
+
+GameStateSnapshot GameEngine::buildSnapshot(const Player& player,
+                                             int handIndex) const {
+    const Hand& hand = player.getHand(handIndex);
+    GameStateSnapshot snap;
+    snap.playerTotal       = hand.getValue();
+    snap.isSoftHand        = hand.isSoft();
+    snap.dealerUpcardValue = m_dealer.getHand(0).getCards().empty()
+                               ? 2
+                               : m_dealer.getHand(0).getCards()[0].getValue();
+    snap.runningCount      = m_runningCount;
+    snap.handIndex         = handIndex;
+    snap.canDouble         = (handIndex == 0)
+                           && (hand.cardCount() == 2)
+                           && (player.getChips() >= player.getCurrentBet());
+    snap.canSplit          = hand.isPair()
+                           && (player.getChips() >= player.getCurrentBet())
+                           && (player.handCount() == 1);
+    snap.canSurrender      = (hand.cardCount() == 2) && !player.hasActed();
+    return snap;
+}
+
 // ─── Public ──────────────────────────────────────────────────────────────────
 
 void GameEngine::run() {
-    m_view.showWelcome();
+    if (!m_headless) { m_view.showWelcome(); }
     while (m_state != GameState::GameOver) {
         executeCurrentState();
     }
@@ -42,8 +72,10 @@ void GameEngine::run() {
         : 0.0;
     m_database->endSession(m_sessionId, finalChips, m_roundNumber, winRate);
 
-    for (const auto& p : m_players) {
-        m_view.showGameOver(p.getName(), p.getChips());
+    if (!m_headless) {
+        for (const auto& p : m_players) {
+            m_view.showGameOver(p.getName(), p.getChips());
+        }
     }
 }
 
@@ -135,11 +167,12 @@ void GameEngine::executeCurrentState() {
 
 void GameEngine::executeBetting() {
     ++m_roundNumber;
-    m_view.showRoundStart(m_roundNumber);
+    if (!m_headless) { m_view.showRoundStart(m_roundNumber); }
 
     if (m_deck.needsReshuffle()) {
         m_deck.reshuffle();
-        std::cout << "(Shoe reshuffled)\n";
+        m_runningCount = 0;
+        if (!m_headless) { std::cout << "(Shoe reshuffled)\n"; }
     }
 
     // Reset per-round action tracking (one entry per player, per hand; splits add entries)
@@ -156,18 +189,38 @@ void GameEngine::executeBetting() {
     transitionTo(GameState::Dealing);
 }
 
+// Hi-Lo card counting: 2-6 = +1, 7-9 = 0, 10-A = -1
+static void updateHiLo(int& runningCount, const Card& card) {
+    int v = card.getValue();
+    if (v >= 2 && v <= 6)        { ++runningCount; }
+    else if (v >= 10 || v == 1)  { --runningCount; }
+    // 7-9 neutral, no change
+}
+
 void GameEngine::executeDealing() {
     for (auto& player : m_players) {
-        player.getHand(0).addCard(m_deck.deal());
+        Card c = m_deck.deal();
+        updateHiLo(m_runningCount, c);
+        player.getHand(0).addCard(c);
     }
-    m_dealer.getHand(0).addCard(m_deck.deal());
+    {
+        Card c = m_deck.deal();
+        updateHiLo(m_runningCount, c);
+        m_dealer.getHand(0).addCard(c);
+    }
     for (auto& player : m_players) {
-        player.getHand(0).addCard(m_deck.deal());
+        Card c = m_deck.deal();
+        updateHiLo(m_runningCount, c);
+        player.getHand(0).addCard(c);
     }
-    m_dealer.getHand(0).addCard(m_deck.deal());
+    {
+        Card c = m_deck.deal();
+        updateHiLo(m_runningCount, c);
+        m_dealer.getHand(0).addCard(c);
+    }
     m_dealer.hideHoleCard();
 
-    m_view.showTable(m_players, m_dealer, true);
+    if (!m_headless) { m_view.showTable(m_players, m_dealer, true); }
     transitionTo(GameState::Insurance);
 }
 
@@ -175,7 +228,7 @@ void GameEngine::executeInsurance() {
     if (m_dealer.getHand(0).getCards().size() >= 1 &&
         m_dealer.getHand(0).getCards()[0].getRank() == Rank::Ace) {
         for (auto& player : m_players) {
-            if (!player.isAI()) {
+            if (!player.isAI() && !m_headless) {
                 if (m_view.promptInsurance(player)) {
                     int half = player.getCurrentBet() / 2;
                     player.placeInsuranceBet(half > 0 ? half : 1);
@@ -197,19 +250,21 @@ void GameEngine::executePlayerTurns() {
 }
 
 void GameEngine::runSingleHandTurn(Player& player, int playerIndex, int handIndex) {
-    m_view.showTable(m_players, m_dealer, true);
+    if (!m_headless) { m_view.showTable(m_players, m_dealer, true); }
 
     Hand& hand = player.getHand(handIndex);
 
     if (hand.isBlackjack()) {
-        m_view.showBlackjackMessage(player.getName());
-        // action remains "Stand" (natural blackjack — no action taken)
+        if (!m_headless) { m_view.showBlackjackMessage(player.getName()); }
         return;
     }
 
     while (true) {
         PlayerAction action;
-        if (player.isAI()) {
+        if (player.isAI() && m_agent) {
+            GameStateSnapshot snap = buildSnapshot(player, handIndex);
+            action = m_agent->decide(snap);
+        } else if (player.isAI()) {
             action = PlayerAction::Stand;
         } else {
             action = m_view.promptPlayerAction(player, handIndex);
@@ -219,10 +274,12 @@ void GameEngine::runSingleHandTurn(Player& player, int playerIndex, int handInde
         switch (action) {
             case PlayerAction::Hit: {
                 m_handActions[playerIndex][handIndex] = "Hit";
-                hand.addCard(m_deck.deal());
-                m_view.showPlayerHand(player, handIndex);
+                Card c = m_deck.deal();
+                updateHiLo(m_runningCount, c);
+                hand.addCard(c);
+                if (!m_headless) { m_view.showPlayerHand(player, handIndex); }
                 if (hand.isBust()) {
-                    m_view.showBustMessage(player.getName());
+                    if (!m_headless) { m_view.showBustMessage(player.getName()); }
                     return;
                 }
                 break;
@@ -236,10 +293,12 @@ void GameEngine::runSingleHandTurn(Player& player, int playerIndex, int handInde
                 player.receiveWinnings(0);
                 int extra = player.getCurrentBet();
                 player.placeBet(extra);
-                hand.addCard(m_deck.deal());
-                m_view.showPlayerHand(player, handIndex);
+                Card c = m_deck.deal();
+                updateHiLo(m_runningCount, c);
+                hand.addCard(c);
+                if (!m_headless) { m_view.showPlayerHand(player, handIndex); }
                 if (hand.isBust()) {
-                    m_view.showBustMessage(player.getName());
+                    if (!m_headless) { m_view.showBustMessage(player.getName()); }
                 }
                 return;
             }
@@ -248,16 +307,20 @@ void GameEngine::runSingleHandTurn(Player& player, int playerIndex, int handInde
                 bool splitAces =
                     (player.getHand(handIndex).getCards()[0].getRank() == Rank::Ace);
                 player.splitHand();
-                // After split, we now have 2 hands — ensure action slots exist
                 if (static_cast<int>(m_handActions[playerIndex].size()) < 2) {
                     m_handActions[playerIndex].resize(2, "Stand");
                 }
-                player.getHand(0).addCard(m_deck.deal());
-                player.getHand(1).addCard(m_deck.deal());
-
+                {
+                    Card c0 = m_deck.deal(); updateHiLo(m_runningCount, c0);
+                    player.getHand(0).addCard(c0);
+                    Card c1 = m_deck.deal(); updateHiLo(m_runningCount, c1);
+                    player.getHand(1).addCard(c1);
+                }
                 if (splitAces) {
-                    m_view.showPlayerHand(player, 0);
-                    m_view.showPlayerHand(player, 1);
+                    if (!m_headless) {
+                        m_view.showPlayerHand(player, 0);
+                        m_view.showPlayerHand(player, 1);
+                    }
                 } else {
                     runSingleHandTurn(player, playerIndex, 0);
                     runSingleHandTurn(player, playerIndex, 1);
@@ -267,7 +330,7 @@ void GameEngine::runSingleHandTurn(Player& player, int playerIndex, int handInde
             case PlayerAction::Surrender: {
                 m_handActions[playerIndex][handIndex] = "Surrender";
                 player.surrender();
-                m_view.showSurrenderMessage(player.getName());
+                if (!m_headless) { m_view.showSurrenderMessage(player.getName()); }
                 return;
             }
         }
@@ -287,11 +350,11 @@ void GameEngine::executeDealerTurn() {
     }
 
     m_dealer.revealHoleCard();
-    m_view.showDealerHand(m_dealer, false);
+    if (!m_headless) { m_view.showDealerHand(m_dealer, false); }
 
     if (!allDone) {
         m_dealer.playTurn(m_deck);
-        m_view.showDealerHand(m_dealer, false);
+        if (!m_headless) { m_view.showDealerHand(m_dealer, false); }
     }
     transitionTo(GameState::Settling);
 }
@@ -310,11 +373,15 @@ void GameEngine::executeSettling() {
             int ins = player.getInsuranceBet();
             if (m_dealer.getHand(0).isBlackjack()) {
                 player.receiveWinnings(ins * 3);
-                m_view.showPayoutResult(player.getName(),
-                    PayoutResult::InsuranceWin, ins, player.getChips());
+                if (!m_headless) {
+                    m_view.showPayoutResult(player.getName(),
+                        PayoutResult::InsuranceWin, ins, player.getChips());
+                }
             } else {
-                m_view.showPayoutResult(player.getName(),
-                    PayoutResult::InsuranceLose, ins, player.getChips());
+                if (!m_headless) {
+                    m_view.showPayoutResult(player.getName(),
+                        PayoutResult::InsuranceLose, ins, player.getChips());
+                }
             }
         }
 
@@ -350,8 +417,10 @@ void GameEngine::executeSettling() {
                 : "Stand";
 
             if (ph.isBust()) {
-                m_view.showPayoutResult(player.getName(),
-                    PayoutResult::Lose, bet, player.getChips());
+                if (!m_headless) {
+                    m_view.showPayoutResult(player.getName(),
+                        PayoutResult::Lose, bet, player.getChips());
+                }
                 GameRecord rec;
                 rec.sessionId         = m_sessionId;
                 rec.timestamp         = currentTimestamp();
@@ -394,7 +463,9 @@ void GameEngine::executeSettling() {
                 display    = payout - bet;
                 outcomeStr = "Win";
             }
-            m_view.showPayoutResult(player.getName(), res, display, player.getChips());
+            if (!m_headless) {
+                m_view.showPayoutResult(player.getName(), res, display, player.getChips());
+            }
 
             GameRecord rec;
             rec.sessionId         = m_sessionId;
@@ -427,6 +498,19 @@ void GameEngine::executeSettling() {
             break;
         }
     }
+
+    m_database->flushBatch();
+
+    if (m_headless) {
+        // Headless: auto-loop as long as any player can still bet
+        if (anyCanPlay) {
+            transitionTo(GameState::Betting);
+        } else {
+            transitionTo(GameState::GameOver);
+        }
+        return;
+    }
+
     if (!anyCanPlay) {
         transitionTo(GameState::GameOver);
         return;
@@ -445,7 +529,6 @@ void GameEngine::executeSettling() {
     }
 
     // Between-rounds menu: loop until the player makes a terminal choice
-    m_database->flushBatch();
     while (true) {
         PostRoundChoice choice = m_view.promptPlayAgain();
         if (choice == PostRoundChoice::ShowHistory) {

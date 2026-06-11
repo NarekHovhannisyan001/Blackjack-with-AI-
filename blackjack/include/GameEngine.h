@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+class AIAgent;
 class Database;
 
 /// Top-level game controller. Owns the deck, dealer, players, and view.
@@ -27,11 +28,20 @@ public:
     GameEngine(int numPlayers, int numDecks, int startingChips,
                uint32_t deckSeed = 0, bool aiOnly = false);
 
-    // Destructor must be defined in .cpp where Database is a complete type.
+    // Destructor must be defined in .cpp where Database and AIAgent are complete types.
     ~GameEngine();
 
     /// Runs the game loop until GameState::GameOver is reached.
     void run();
+
+    /// Attach an AI agent. When set, AI players use this agent to decide actions.
+    void setAgent(std::unique_ptr<AIAgent> agent);
+
+    /// When true, all ConsoleView output is suppressed (used by TrainingRunner).
+    void setHeadless(bool headless);
+
+    /// Build the game-state snapshot the AI agent needs before deciding.
+    GameStateSnapshot buildSnapshot(const Player& player, int handIndex) const;
 
     /// Computes and returns the chips returned to the player for one hand.
     /// Returns 0 for a loss; returns original bet for a push; returns more for wins.
@@ -50,10 +60,13 @@ private:
     GameState                                m_state;
     ConsoleView                              m_view;
     std::unique_ptr<Database>                m_database;
+    std::unique_ptr<AIAgent>                 m_agent;
     int                                      m_roundNumber;
-    int                                      m_sessionId       = 0;
-    int                                      m_winsThisSession = 0;
-    int                                      m_handsThisSession= 0;
+    int                                      m_sessionId        = 0;
+    int                                      m_winsThisSession  = 0;
+    int                                      m_handsThisSession = 0;
+    int                                      m_runningCount     = 0;
+    bool                                     m_headless         = false;
     // m_handActions[playerIdx][handIdx] = last action string for that hand
     std::vector<std::vector<std::string>>    m_handActions;
 

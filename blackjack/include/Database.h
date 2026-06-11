@@ -11,9 +11,6 @@
 class SqliteConnection;
 struct sqlite3_stmt;
 
-/// Agent type used to tag game sessions and training snapshots.
-enum class AgentType { Human, QLearning, MonteCarlo };
-
 /// Single entry in the Q-table: action-value estimate and visit count.
 struct QEntry {
     double qValue     = 0.0;
